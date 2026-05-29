@@ -4,7 +4,7 @@
 % MRI (Task01_BrainTumour) e coordina la valutazione comparativa di
 % Otsu, K-Means e Watershed.
 %
-% ARCHITETTURA AGGIORNATA (Grid Search Per-Method):
+% ARCHITETTURA (Grid Search Per-Method):
 %   - La grid search trova il miglior (filtro, config) PER OGNI METODO
 %     separatamente: Otsu, K-Means e Watershed vengono ognuno ottimizzato
 %     in modo indipendente sul validation set (80%).
