@@ -1,0 +1,264 @@
+% ESEGUI_PIPELINE_METODO — Incapsula l’intera pipeline per un singolo metodo di segmentazione.
+%
+%   INPUT
+%   - nome_metodo        : stringa, identifica l’algoritmo di segmentazione
+%                           ammesso tra 'Otsu', 'K‑Means', 'Watershed'.
+%   - cartella_immagini  : percorso alla directory contenente i volumi MRI (.nii.gz).
+%   - cartella_labels    : percorso alla directory delle corrispondenti Ground Truth.
+%   - lista_immagini     : struct generata da dir() con l’elenco dei file delle immagini.
+%   - lista_labels       : struct analoga per le label.
+%   - num_pazienti       : numero di soggetti da elaborare.
+%
+%   OUTPUT
+%   - Dataset_Acc        : matrice (num_pazienti × num_configurazioni) — Accuracy.
+%   - Dataset_Sens       : idem per Sensitivity.
+%   - Dataset_Spec       : idem per Specificity.
+%   - Dataset_Jacc       : idem per Jaccard (IoU).
+%   - Dataset_F1         : idem per F1‑Score (Dice).
+%
+%   OGNI MATRICE CONTIENE LE METRICHE DI TUTTI I PAZIENTI PER OGNI
+%   CONFIGURAZIONE DEL METODO, SENZA INTERFERIRE CON QUELLE DI ALTRI METODI.
+%
+%   DESCRIZIONE
+%   La funzione realizza il ciclo completo su tutti i pazienti:
+%       1. Carica il volume FLAIR e la Ground Truth;
+%       2. Definisce la ROI anatomica (40% centrale);
+%       3. Inizializza gli accumulatori volumetrici di TP, TN, FP, FN;
+%       4. Itera su tutte le slice della ROI effettuando pre‑processing
+%          e chiamando la funzione di segmentazione specificata dal nome_metodo;
+%       5. Accumula i conteggi e al termine calcola le metriche per il paziente;
+%       6. Ripete per tutti i pazienti e restituisce le matrici finali.
+%
+%   All’interno viene allocato l’elemento strutturante SE = strel('disk',5) e,
+%   tramite uno switch su nome_metodo, vengono selezionate la funzione di
+%   segmentazione e le configurazioni appropriate.
+
+function [Dataset_Acc, Dataset_Sens, Dataset_Spec, Dataset_Jacc, Dataset_F1, configs] = ...
+    esegui_pipeline_metodo(nome_metodo, cartella_immagini, cartella_labels, ...
+    lista_immagini, lista_labels, num_pazienti)
+
+% =========================================================================
+% SELEZIONE DEL METODO E DELLE CONFIGURAZIONI DI SEGMENTAZIONE
+% =========================================================================
+% Lo switch seguente associa al nome del metodo (stringa) due elementi:
+%   - configs  : vettore delle configurazioni da testare (es. numero di
+%                soglie/cluster). Per Otsu e K-Means si usano 2, 3, 4
+%                classi. Anche Watershed è stato uniformato a 2, 3, 4 per
+%                garantire un confronto omogeneo.
+%   - seg_func : handle alla funzione di segmentazione corrispondente,
+%                che deve avere firma: maschera = funzione(img, config, SE).
+
+% Elemento strutturante standard per Otsu e K-Means (allocato una sola volta)
+SE = strel('disk', 5);
+
+switch nome_metodo
+    case 'Otsu'
+        configs = [2, 3, 4];
+        seg_func = @segmenta_otsu;
+        
+    case 'K-Means'
+        configs = [2, 3, 4];
+        seg_func = @segmenta_kmeans;
+        
+    case 'Watershed'
+        configs  = [0.90, 0.95, 0.98];
+        % Pre-allocazione specifica per Watershed (fuori dal loop pazienti/slice)
+        SE_grad   = strel('disk', 1);
+        SE_smooth = strel('disk', 3);
+
+        % Pattern Adapter tramite Closure: l'orchestratore passerà 'SE', 
+        % ma la closure lo ignorerà (~) iniettando i due SE specifici.
+        seg_func = @(img, cfg, ~) segmenta_watershed(img, cfg, SE_grad, SE_smooth);
+end
+
+% numero di configurazioni per il metodo corrente
+num_conf = length(configs);
+
+% Pre‑allocazione delle matrici di output.
+% Ogni matrice ha dimensione [num_pazienti × num_conf] e memorizzerà
+% le metriche di tutti i pazienti per ciascuna configurazione del metodo.
+% L'accesso è del tipo: Dataset_Acc(paziente, config).
+Dataset_Acc  = zeros(num_pazienti, num_conf);
+Dataset_Sens = zeros(num_pazienti, num_conf);
+Dataset_Spec = zeros(num_pazienti, num_conf);
+Dataset_Jacc = zeros(num_pazienti, num_conf);
+Dataset_F1   = zeros(num_pazienti, num_conf);
+
+% Elemento strutturante per le operazioni morfologiche (disco di raggio 5).
+% Il valore è coerente con il paper di riferimento e viene allocato una
+% sola volta all'esterno del ciclo sulle slice per ragioni di efficienza.
+
+
+% Dimensione standard a cui vengono ridimensionate tutte le slice.
+% Garantisce uniformità indipendentemente dalla risoluzione nativa del volume.
+dim_standard = [240 240];
+
+% =========================================================================
+% CICLO PRINCIPALE SUI PAZIENTI
+% =========================================================================
+% Il ciclo itera su tutti i soggetti del dataset. Per ogni paziente:
+%   - Vengono caricati il volume FLAIR e la corrispondente Ground Truth.
+%   - Viene definita la Regione di Interesse (ROI) anatomica (40% centrale).
+%   - (Opzionale) Per il primo paziente viene generata una visualizzazione
+%     di controllo qualitativo delle maschere segmentate.
+%
+% L'elaborazione è completamente isolata tra un metodo e l'altro grazie
+% alla funzione wrapper: tutte le variabili (accumulatori, maschere, etc.)
+% sono locali a questa funzione e vengono ricreate per ogni metodo.
+
+for paziente_idx = 1:num_pazienti
+
+    % -----------------------------------------------------------------
+    % CARICAMENTO DEI VOLUMI
+    % -----------------------------------------------------------------
+    % Costruzione dei percorsi completi ai file .nii.gz
+    nome_file_img = fullfile(cartella_immagini, lista_immagini(paziente_idx).name);
+    nome_file_lbl = fullfile(cartella_labels, lista_labels(paziente_idx).name);
+
+    fprintf('Paziente %d/%d: %s\n', paziente_idx, num_pazienti, lista_immagini(paziente_idx).name);
+
+    % Caricamento del volume 4D (x, y, z, modalità) e estrazione del canale FLAIR
+    info_img = niftiinfo(nome_file_img);
+    vol_4D = niftiread(info_img);
+    vol_FLAIR = vol_4D(:, :, :, 1); % FLAIR: sequenza a elevato contrasto per il tumore
+
+    % Caricamento della Ground Truth e binarizzazione per il "Whole Tumor"
+    info_lbl = niftiinfo(nome_file_lbl);
+    vol_GT_raw = niftiread(info_lbl);
+    vol_GT = vol_GT_raw > 0; % 0 = sano, 1 = tumore (include edema e core)
+
+    % -----------------------------------------------------------------
+    % DEFINIZIONE DELLA ROI ANATOMICA (Regola del 40% Centrale)
+    % -----------------------------------------------------------------
+    % La ROI esclude le porzioni estreme del volume (30% inferiore e 30%
+    % superiore) per concentrare l'analisi sulle slice in cui il tumore è
+    % più frequentemente presente e per ridurre artefatti dovuti a osso,
+    % bulbi oculari o altro. È una scelta anatomica, indipendente dalla Ground Truth.
+
+    profondita = info_img.ImageSize(3);
+    slice_iniziale = round(profondita * 0.30);
+    slice_finale   = round(profondita * 0.70);
+
+    % -----------------------------------------------------------------
+    % VISUALIZZAZIONE DI CONTROLLO (SANITY CHECK)
+    % -----------------------------------------------------------------
+    % Per il primo paziente soltanto, viene generata una figura che mostra,
+    % per ogni configurazione del metodo corrente, la maschera segmentata
+    % sulla slice centrale della ROI. Questo consente un'ispezione
+    % qualitativa immediata della pipeline senza influire sulle metriche.
+
+    if paziente_idx == 1
+        slice_equatore = round((slice_iniziale + slice_finale) / 2);
+        visualizza_sanity_check(vol_FLAIR, slice_equatore, nome_metodo, ...
+            seg_func, configs, SE, dim_standard, [3 3]);
+    end
+
+    % -----------------------------------------------------------------
+    % INIZIALIZZAZIONE ACCUMULATORI VOLUMETRICI (LOCALI AL PAZIENTE)
+    % -----------------------------------------------------------------
+    % Vengono azzerati, per il paziente corrente, i contatori di True
+    % Positive, True Negative, False Positive e False Negative per ogni
+    % configurazione del metodo (colonne). La lunghezza dei vettori è
+    % pari a num_conf (es. 3 per Otsu 2,3,4 soglie).
+    %
+    % Questi accumulatori consentono di sommare i contributi di tutte le
+    % slice della ROI prima di calcolare le metriche, realizzando una
+    % matrice di confusione volumetrica. Questo approccio evita il
+    % paradosso di Simpson e pesa ogni voxel in modo uniforme, anziché
+    % mediare metriche calcolate su singole slice.
+
+    TP_tot = zeros(1, num_conf);
+    TN_tot = zeros(1, num_conf);
+    FP_tot = zeros(1, num_conf);
+    FN_tot = zeros(1, num_conf);
+
+    % =================================================================
+    % CICLO PRINCIPALE SULLE SLICE DELLA ROI
+    % =================================================================
+    % Itera su tutte le slice comprese tra slice_iniziale e slice_finale.
+    % Per ogni slice si esegue:
+    %   - estrazione e pre‑processing (normalizzazione, filtraggio, resize);
+    %   - segmentazione con ciascuna configurazione del metodo corrente;
+    %   - accumulo dei conteggi TP, TN, FP, FN mediante confronto con la
+    %     Ground Truth (anch’essa ridimensionata con interpolazione nearest).
+
+    for z = slice_iniziale:slice_finale
+
+        % ---------------------------------------------------------
+        % PRE‑PROCESSING DELLA SLICE
+        % ---------------------------------------------------------
+        % La pipeline eseguita sarebbe:
+        %   1. Estrazione della slice dal volume FLAIR 3D.
+        %   2. Normalizzazione dell’intensità in [0, 1] con mat2gray.
+        %   3. Filtraggio mediano 3×3 sulla risoluzione nativa per
+        %      attenuare il rumore impulsivo senza degradare i bordi.
+        %   4. Ridimensionamento alle dimensioni standard (240×240) per
+        %      uniformità tra pazienti e con la Ground Truth.
+
+        slice = vol_FLAIR(:, :, z);
+        img_gray = mat2gray(slice);
+        img_filtrata = medfilt2(img_gray, [3 3]);
+        img_processata = imresize(img_filtrata, dim_standard);
+
+        % ---------------------------------------------------------
+        % GROUND TRUTH DELLA SLICE
+        % ---------------------------------------------------------
+        % La maschera binaria (Whole Tumor) viene ridimensionata alla
+        % stessa risoluzione dell’immagine processata, usando il flag
+        % 'nearest'. Questo è indispensabile per preservare i valori
+        % esattamente binari {0,1} ed evitare artefatti da interpolazione
+        % che falserebbero i conteggi.
+
+        gt_slice = vol_GT(:, :, z);
+        gt_slice = imresize(gt_slice, dim_standard, 'nearest');
+
+        % ---------------------------------------------------------
+        % SEGMENTAZIONE E ACCUMULO PER OGNI CONFIGURAZIONE
+        % ---------------------------------------------------------
+        % Per ogni configurazione (es. 2, 3, 4 soglie per Otsu), si
+        % invoca la funzione di segmentazione del metodo corrente.
+        % La maschera binaria ottenuta viene confrontata voxel‑a‑voxel
+        % con la Ground Truth e i quattro conteggi vengono sommati agli
+        % accumulatori volumetrici.
+
+        for c = 1:num_conf
+            mask = seg_func(img_processata, configs(c), SE);
+
+            % Accumulo dei contributi della slice corrente
+            TP_tot(c) = TP_tot(c) + sum(mask(:) == 1 & gt_slice(:) == 1);
+            TN_tot(c) = TN_tot(c) + sum(mask(:) == 0 & gt_slice(:) == 0);
+            FP_tot(c) = FP_tot(c) + sum(mask(:) == 1 & gt_slice(:) == 0);
+            FN_tot(c) = FN_tot(c) + sum(mask(:) == 0 & gt_slice(:) == 1);
+        end
+    end
+
+    % =================================================================
+    % CALCOLO DELLE METRICHE PER IL PAZIENTE CORRENTE
+    % =================================================================
+    % Al termine del ciclo sulle slice, gli accumulatori TP_tot, TN_tot,
+    % FP_tot, FN_tot contengono i conteggi volumetrici complessivi per
+    % ogni configurazione del metodo. Le metriche vengono quindi calcolate
+    % una sola volta sull'intero volume della ROI, evitando distorsioni
+    % statistiche da aggregazione di medie per slice (Simpson's paradox).
+    %
+    % Per ciascuna configurazione c:
+    %   - Accuracy    = (TP+TN) / (TP + TN + FP + FN) - capacità di classificare voxel 
+    %                                                   (sia tumorali che sani) correttamente
+    %   - Sensitivity = TP / (TP+FN)                  - capacità di rilevare il tumore
+    %   - Specificity = TN / (TN+FP)                  - capacità di riconoscere il tessuto sano
+    %   - Jaccard     = TP / (TP+FP+FN)               - sovrapposizione spaziale (IoU)
+    %   - F1‑Score    = 2*TP / (2*TP+FP+FN)           - media armonica di Precision e Recall
+    %
+    % I risultati vengono scritti direttamente nelle matrici di output
+    % (Dataset_*) alla riga corrispondente al paziente corrente.
+    for c = 1:num_conf
+        TP = TP_tot(c); TN = TN_tot(c); FP = FP_tot(c); FN = FN_tot(c);
+
+        Dataset_Acc(paziente_idx, c)  = (TP + TN) / (TP + TN + FP + FN);
+        Dataset_Sens(paziente_idx, c) = TP / (TP + FN);
+        Dataset_Spec(paziente_idx, c) = TN / (TN + FP);
+        Dataset_Jacc(paziente_idx, c) = TP / (TP + FP + FN);
+        Dataset_F1(paziente_idx, c)   = (2 * TP) / (2 * TP + FP + FN);
+    end
+end % Fine ciclo pazienti
+end

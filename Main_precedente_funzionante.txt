@@ -1,0 +1,180 @@
+%% Main_Ottimizzato – Orchestratore modulare per il confronto di metodi di segmentazione
+%
+% Il presente script esegue il batch processing sull’intero dataset di volumi
+% MRI (Task01_BrainTumour) e coordina la valutazione comparativa di più
+% algoritmi di segmentazione (Otsu, K‑Means, Watershed).
+%
+% L’architettura è progettata per principio di separazione delle responsabilità:
+%   - Il Main si occupa esclusivamente di input/output, verifica integrità
+%     dei dati e aggregazione statistica finale.
+%   - La funzione wrapper "esegui_pipeline_metodo" incapsula l’intero
+%     processing (caricamento, preprocessing, segmentazione, validazione)
+%     restituendo le metriche già aggregate per ciascun metodo.
+%
+% In questo modo ogni tecnica di segmentazione opera su dati identici e
+% produce risultati indipendenti, eliminando il rischio di sovrascrittura
+% e semplificando l’estensione a nuovi algoritmi.
+
+% Inizializzazione dell’ambiente di lavoro
+clear;
+clc;
+close all;
+
+% =========================================================================
+% ACQUISIZIONE DEL DATASET E VERIFICA DI INTEGRITÀ
+% =========================================================================
+% Percorsi delle cartelle contenenti i volumi MRI e le corrispondenti
+% segmentazioni manuali (Ground Truth).
+cartella_immagini = "/Users/federicoraimondi/Library/CloudStorage/OneDrive-PolitecnicodiBari/Università/Magistrale/1 ° Anno/1° Semestre/Guerriero/Progetto_Image_Processing/data/Task01_BrainTumour/immaginiMRI/";
+cartella_labels   = "/Users/federicoraimondi/Library/CloudStorage/OneDrive-PolitecnicodiBari/Università/Magistrale/1 ° Anno/1° Semestre/Guerriero/Progetto_Image_Processing/data/Task01_BrainTumour/GroundTruth/";
+
+% Acquisizione delle liste di file in formato NIfTI compresso (.nii.gz)
+lista_immagini = dir(fullfile(cartella_immagini, '*.nii.gz'));
+lista_labels   = dir(fullfile(cartella_labels, '*.nii.gz'));
+
+num_pazienti = length(lista_immagini);
+fprintf('Pazienti individuati nel subset: %d\n\n', num_pazienti);
+
+% Controllo di consistenza 1: verfica della presenza di stesso numero di
+% immagini - label
+if num_pazienti ~= length(lista_labels)
+    error('Il numero di immagini (%d) non coincide con il numero di label (%d)!', ...
+        num_pazienti, length(lista_labels));
+end
+
+% Controllo di consistenza 2: corrispondenza 1:1 dei nomi file
+for k = 1:num_pazienti
+    nome_completo_img = lista_immagini(k).name;
+    nome_completo_lbl = lista_labels(k).name;
+
+    % Estrazione del nome base rimuovendo l’estensione doppia ".nii.gz"
+    [~, nome_base_img, ext_img] = fileparts(nome_completo_img);
+    if strcmp(ext_img, '.gz')
+        [~, nome_base_img, ~] = fileparts(nome_base_img);
+    end
+    [~, nome_base_lbl, ext_lbl] = fileparts(nome_completo_lbl);
+    if strcmp(ext_lbl, '.gz')
+        [~, nome_base_lbl, ~] = fileparts(nome_base_lbl);
+    end
+    if ~strcmp(nome_base_img, nome_base_lbl)
+        error('Disallineamento: %s vs %s', nome_completo_img, nome_completo_lbl);
+    end
+end
+fprintf('Integrità del subset verificata: ogni immagine ha la propria label.\n\n');
+
+% =========================================================================
+% DEFINIZIONE DEI METODI DI SEGMENTAZIONE DA CONFRONTARE
+% =========================================================================
+% Questa sezione stabilisce l’insieme degli algoritmi da valutare.
+% La variabile "metodi_da_testare" è un array di stringhe che identifica
+% ciascun metodo. L’ordine di inserimento determina la sequenza di
+% esecuzione e, successivamente, l’ordine con cui verranno salvati e
+% visualizzati i risultati.
+metodi_da_testare = {'Otsu', 'K-Means', 'Watershed'};
+
+% Preallocazione del contenitore dei risultati.
+% "Risultati" sarà un array di celle, una cella per ogni metodo.
+Risultati = cell(1, numel(metodi_da_testare));
+
+% =========================================================================
+% ESECUZIONE DELLA PIPELINE PER OGNI METODO
+% =========================================================================
+% Il ciclo seguente costituisce il cuore dell’orchestrazione:
+%   - Itera sulla lista dei metodi di segmentazione definita nella sezione
+%     precedente
+%   - Per ciascun metodo invoca la funzione wrapper "esegui_pipeline_metodo",
+%     la quale esegue l’intero flusso di elaborazione (caricamento,
+%     preprocessing, segmentazione, validazione) in modo isolato, restituendo
+%     le cinque matrici di metriche (pazienti × configurazioni)
+%   - Le metriche vengono poi archiviate nella struttura "Risultati" per la
+%     successiva fase di aggregazione e confronto finale
+
+for m = 1:numel(metodi_da_testare)
+    nome_metodo = metodi_da_testare{m};
+    fprintf('\n======================================================\n');
+    fprintf('   ELABORAZIONE METODO: %s\n', nome_metodo);
+    fprintf('======================================================\n');
+
+    % Chiamata alla funzione wrapper.
+    % I parametri di ingresso sono i percorsi dei dati, le liste dei file e
+    % il numero di pazienti; il wrapper restituisce le metriche aggregate
+    % (matrici num_pazienti × num_configurazioni).
+    [Dataset_Acc, Dataset_Sens, Dataset_Spec, Dataset_Jacc, Dataset_F1, configs_metodo] = ...
+        esegui_pipeline_metodo(nome_metodo, cartella_immagini, cartella_labels, ...
+        lista_immagini, lista_labels, num_pazienti);
+
+    % Archiviazione ordinata dei risultati nella struttura "Risultati".
+    % Ogni elemento presenta i campi:
+    %   .nome        – nome del metodo
+    %   .Accuracy    – matrice num_pazienti × num_configurazioni
+    %   .Sensitivity – matrice num_pazienti × num_configurazioni
+    %   .Specificity – matrice num_pazienti × num_configurazioni
+    %   .Jaccard     – matrice num_pazienti × num_configurazioni
+    %   .F1          – matrice num_pazienti × num_configurazioni
+
+    Risultati{m}.nome = nome_metodo;
+    Risultati{m}.Accuracy    = Dataset_Acc;
+    Risultati{m}.Sensitivity = Dataset_Sens;
+    Risultati{m}.Specificity = Dataset_Spec;
+    Risultati{m}.Jaccard     = Dataset_Jacc;
+    Risultati{m}.F1          = Dataset_F1;
+
+    % Salvataggio della configurazione del metodo
+    Risultati{m}.configs = configs_metodo;
+end
+
+% =========================================================================
+% CONFRONTO FINALE – MEDIE STATISTICHE SU TUTTO IL SUBSET
+% =========================================================================
+% Al termine dell'elaborazione di tutti i pazienti, questa sezione
+% calcola le metriche aggregate per ciascun metodo di segmentazione e
+% le presenta in formato tabellare per un confronto immediato.
+%
+% Per ogni metodo:
+%   - Si calcola la media aritmetica (patient‑wise) di ciascuna metrica
+%     su tutti i soggetti del subset. Ogni paziente contribuisce con
+%     lo stesso peso, indipendentemente dal volume tumorale individuale.
+%   - Si generano dinamicamente le etichette delle configurazioni in base
+%     al nome del metodo.
+%   - Si costruisce una tabella riepilogativa con le cinque metriche
+%     medie e la si stampa a schermo.
+fprintf('\n\n******************************************************\n');
+fprintf('   ELABORAZIONE COMPLETATA - RISULTATI A CONFRONTO\n');
+fprintf('******************************************************\n\n');
+
+for m = 1:numel(metodi_da_testare)
+    % Media aritmetica lungo la prima dimensione (pazienti) per ciascuna
+    % configurazione (colonna). Il risultato è un vettore riga di lunghezza
+    % pari al numero di configurazioni del metodo.
+    Media_Acc = mean(Risultati{m}.Accuracy, 1);
+    Media_Sens = mean(Risultati{m}.Sensitivity, 1);
+    Media_Spec = mean(Risultati{m}.Specificity, 1);
+    Media_Jacc = mean(Risultati{m}.Jaccard, 1);
+    Media_F1 = mean(Risultati{m}.F1, 1);
+
+    % Generazione delle etichette per le righe della tabella.
+    configs_correnti = Risultati{m}.configs;
+    switch Risultati{m}.nome
+        case 'Otsu'
+            nomi_test = arrayfun(@(c) sprintf('Otsu %d Soglie', c), ...
+                configs_correnti, 'UniformOutput', false);
+        case 'K-Means'
+            nomi_test = arrayfun(@(c) sprintf('K-Means k=%d', c), ...
+                configs_correnti, 'UniformOutput', false);
+        case 'Watershed'
+            nomi_test = arrayfun(@(c) sprintf('Watershed p=%.2f', c), ...
+                configs_correnti, 'UniformOutput', false);
+        otherwise
+            nomi_test = arrayfun(@(c) sprintf('Config %d', c), ...
+                configs_correnti, 'UniformOutput', false);
+    end
+
+    % Costruzione della tabella riepilogativa.
+    % Ogni riga corrisponde a una configurazione, ogni colonna a una metrica.
+    risultati_Globali = table(Media_Acc', Media_Sens', Media_Spec', Media_Jacc', Media_F1', ...
+        'RowNames', nomi_test, ...
+        'VariableNames', {'Accuracy','Sensitivity','Specificity','Jaccard','F1'});
+
+    fprintf('\n--- %s ---\n', Risultati{m}.nome);
+    disp(risultati_Globali);
+end
