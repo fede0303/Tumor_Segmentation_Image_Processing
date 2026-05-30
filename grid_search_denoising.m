@@ -65,7 +65,7 @@ for m = 1:num_metodi
     fprintf('╚══════════════════════════════════════════════════════════╝\n');
 
     % Tracciamento del best per questo metodo
-    Accuracy_best       = -Inf;
+    Accuracy_best = -Inf;
     filtro_best_m = [];
     config_best_m = NaN;
 
