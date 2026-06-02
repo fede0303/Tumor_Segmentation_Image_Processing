@@ -1,23 +1,17 @@
 %% Main_Ottimizzato – Orchestratore modulare per il confronto di metodi di segmentazione
 %
-% Il presente script esegue il batch processing sull'intero dataset di volumi
-% MRI (Task01_BrainTumour) e coordina la valutazione comparativa di
-% Otsu, K-Means e Watershed.
+% BRANCH: feature/tumor-slice-filter
 %
-% ARCHITETTURA AGGIORNATA (Grid Search Per-Method):
-%   - La grid search trova il miglior (filtro, config) PER OGNI METODO
-%     separatamente: Otsu, K-Means e Watershed vengono ognuno ottimizzato
-%     in modo indipendente sul validation set (80%).
-%   - La valutazione finale confronta "il miglior Otsu possibile" vs
-%     "il miglior K-Means possibile" vs "il miglior Watershed possibile",
-%     ciascuno con il proprio filtro e configurazione ottimali.
-%   - Questo risponde alla domanda: "Quale algoritmo, quando ottimizzato,
-%     raggiunge la performance più alta sul test set (20%)?"
-%   - Il confronto è equo perché ogni metodo ha avuto le stesse opportunità
-%     di ottimizzazione (stessi filtri candidati, stesse configurazioni candidate).
+% Questo branch implementa l'Oracle Sanity Check: la valutazione finale
+% viene condotta SOLO sulle slice che contengono tumore nella Ground Truth.
+% La Grid Search usa F1-Score come criterio di ottimizzazione (non Accuracy).
 %
-% Se ESEGUI_GRID_SEARCH = false, viene usato un filtro e una config di default
-% per ogni metodo (Median 3x3, configurazione intermedia) sull'intero dataset.
+% Differenze rispetto al branch main:
+%   - Grid Search: max(F1) invece di max(Accuracy)  [condiviso con main]
+%   - Valutazione Test Set: solo_slice_positive = true  [solo questo branch]
+%   - Output: unica tabella Oracle  [solo questo branch]
+%
+% Vedere §6.4 della relazione per la discussione metodologica.
 
 clear; clc; close all;
 
@@ -33,13 +27,11 @@ lista_labels   = dir(fullfile(cartella_labels,   '*.nii.gz'));
 num_pazienti = length(lista_immagini);
 fprintf('Pazienti individuati nel subset: %d\n\n', num_pazienti);
 
-% Controllo di consistenza 1: stesso numero di immagini e label
 if num_pazienti ~= length(lista_labels)
     error('Il numero di immagini (%d) non coincide con il numero di label (%d)!', ...
         num_pazienti, length(lista_labels));
 end
 
-% Controllo di consistenza 2: corrispondenza 1:1 dei nomi file
 for k = 1:num_pazienti
     [~, nome_base_img, ext_img] = fileparts(lista_immagini(k).name);
     if strcmp(ext_img, '.gz'), [~, nome_base_img, ~] = fileparts(nome_base_img); end
@@ -54,13 +46,7 @@ fprintf('Integrità del subset verificata: ogni immagine ha la propria label.\n\
 % =========================================================================
 % SPLIT VALIDATION / TEST (80% / 20%)
 % =========================================================================
-% VALIDATION SET (80%): usato ESCLUSIVAMENTE dalla grid search per trovare
-%   il miglior (filtro, config) per ogni metodo. Non compare nella valutazione finale.
-% TEST SET (20%): usato ESCLUSIVAMENTE per la valutazione finale.
-%   Non viene mai usato per la selezione di filtro o config.
-% Questa separazione garantisce l'assenza di data leakage.
-
-rng('default');                         % per riproducibilità
+rng('default');
 indici_casuali = randperm(num_pazienti);
 num_valid      = round(num_pazienti * 0.8);
 idx_valid      = indici_casuali(1:num_valid);
@@ -76,32 +62,27 @@ metodi_da_testare = {'Otsu', 'K-Means', 'Watershed'};
 
 % =========================================================================
 % GRID SEARCH PER-METHOD (OPZIONALE) — SOLO SUL VALIDATION SET
+% Criterio: max(F1-Score medio) — immune all'accuracy paradox
 % =========================================================================
-ESEGUI_GRID_SEARCH = true;   % false per usare i default senza grid search
+ESEGUI_GRID_SEARCH = true;
 
 if ESEGUI_GRID_SEARCH
-    % Definizione dei filtri candidati da esplorare
     filtri_candidati = [
         struct('nome', 'Median 3x3',          'tipo', 'median',   'param', [3 3]);
         struct('nome', 'Gaussian sigma=0.5',  'tipo', 'gaussian', 'param', 0.5);
         struct('nome', 'Wiener 3x3',          'tipo', 'wiener',   'param', [3 3]);
         ];
 
-    % Grid search per-method sul validation set.
-    % Restituisce best_models: struct array con il miglior (filtro, config) per ogni metodo.
     best_models = grid_search_denoising(metodi_da_testare, ...
         cartella_immagini, cartella_labels, ...
         lista_immagini(idx_valid), lista_labels(idx_valid), ...
         num_valid, filtri_candidati);
 
-    % La valutazione finale avviene SOLO sul test set (mai visto durante la grid search)
     lista_valutazione_img = lista_immagini(idx_test);
     lista_valutazione_lbl = lista_labels(idx_test);
     num_valutazione       = length(idx_test);
 
 else
-    % Default: filtro Median e configurazione intermedia per ogni metodo.
-    % Nessuna ottimizzazione eseguita → potenza computazionale minima.
     default_filtro = struct('nome', 'Median 3x3', 'tipo', 'median', 'param', [3 3]);
     num_metodi     = numel(metodi_da_testare);
     best_models    = struct();
@@ -109,39 +90,37 @@ else
     for m = 1:num_metodi
         best_models(m).nome    = metodi_da_testare{m};
         best_models(m).filtro  = default_filtro;
-        best_models(m).Accuracy_best = NaN;   % non calcolato (nessuna grid search)
+        best_models(m).F1_best = NaN;
         switch metodi_da_testare{m}
-            case 'Otsu',      best_models(m).config = 3;    % 3 soglie (default)
-            case 'K-Means',   best_models(m).config = 3;    % k=3 (default)
-            case 'Watershed', best_models(m).config = 0.95; % p=0.95 (default)
+            case 'Otsu',      best_models(m).config = 3;
+            case 'K-Means',   best_models(m).config = 3;
+            case 'Watershed', best_models(m).config = 0.95;
         end
     end
 
-    % Senza grid search si valuta sull'intero dataset (no leakage perché non si è
-    % effettuata nessuna selezione su alcun sottinsieme)
     lista_valutazione_img = lista_immagini;
     lista_valutazione_lbl = lista_labels;
     num_valutazione       = num_pazienti;
 end
 
 % =========================================================================
-% VALUTAZIONE FINALE — DOPPIO PASSAGGIO
-%   Passaggio 1 (flag=false): tutte le slice della ROI  → risultati originali
-%   Passaggio 2 (flag=true) : solo slice con tumore in GT → analisi complementare
-% I risultati del Passaggio 1 sono quelli riportati nella Sezione 6 della relazione.
-% Il Passaggio 2 rimuove il contributo dei FP generati su slice prive di lesione.
+% ORACLE SANITY CHECK — VALUTAZIONE SOLO SULLE SLICE CON TUMORE
+%   solo_slice_positive = true: le slice prive di tumore nella GT vengono
+%   saltate. Questo elimina il contributo dei FP "ciechi" sulle fette sane
+%   e mostra il limite superiore del segmentatore (upper bound).
+%   NOTA METODOLOGICA: usa la GT come oracolo → data leakage dichiarato
+%   sul protocollo di valutazione (non sul modello di segmentazione).
 % =========================================================================
 fprintf('\n============================================================\n');
 if ESEGUI_GRID_SEARCH
-    fprintf('   VALUTAZIONE FINALE SUL TEST SET (%d pazienti)\n', num_valutazione);
+    fprintf('   ORACLE SANITY CHECK — TEST SET (%d pazienti)\n', num_valutazione);
 else
-    fprintf('   VALUTAZIONE FINALE SULL''INTERO DATASET (%d pazienti)\n', num_valutazione);
+    fprintf('   ORACLE SANITY CHECK — DATASET COMPLETO (%d pazienti)\n', num_valutazione);
 end
+fprintf('   [Solo slice con tumore nella GT | Grid Search con F1]\n');
 fprintf('============================================================\n\n');
 
-% Preallocazione contenitori per i due passaggi
-Risultati_All   = cell(1, numel(metodi_da_testare));   % tutte le slice
-Risultati_Tumor = cell(1, numel(metodi_da_testare));   % solo slice positive
+Risultati_Oracle = cell(1, numel(metodi_da_testare));
 
 for m = 1:numel(metodi_da_testare)
     nome_metodo = best_models(m).nome;
@@ -152,88 +131,48 @@ for m = 1:numel(metodi_da_testare)
     fprintf('   METODO:  %s\n', nome_metodo);
     fprintf('   Filtro:  %s\n', filtro_best.nome);
     fprintf('   Config:  %s\n', format_config_main(nome_metodo, config_best));
-    if ESEGUI_GRID_SEARCH && ~isnan(best_models(m).Accuracy_best)
-        fprintf('   Accuracy val:  %.4f\n', best_models(m).Accuracy_best);
+    if ESEGUI_GRID_SEARCH && ~isnan(best_models(m).F1_best)
+        fprintf('   F1 val (validation):  %.4f\n', best_models(m).F1_best);
     end
     fprintf('======================================================\n');
 
-    % ------------------------------------------------------------------
-    % Passaggio 1: tutte le slice della ROI (comportamento originale)
-    % ------------------------------------------------------------------
-    [Acc, Sens, Spec, Jacc, F1] = esegui_pipeline_metodo( ...
-        nome_metodo, cartella_immagini, cartella_labels, ...
-        lista_valutazione_img, lista_valutazione_lbl, num_valutazione, ...
-        filtro_best, config_best, true, false);
-
-    Risultati_All{m}.nome        = nome_metodo;
-    Risultati_All{m}.filtro      = filtro_best.nome;
-    Risultati_All{m}.config      = config_best;
-    Risultati_All{m}.Accuracy    = Acc;
-    Risultati_All{m}.Sensitivity = Sens;
-    Risultati_All{m}.Specificity = Spec;
-    Risultati_All{m}.Jaccard     = Jacc;
-    Risultati_All{m}.F1          = F1;
-
-    % ------------------------------------------------------------------
-    % Passaggio 2: solo slice con tumore (analisi complementare)
-    % ------------------------------------------------------------------
+    % Oracle: solo slice con tumore (solo_slice_positive = true)
     [Acc, Sens, Spec, Jacc, F1] = esegui_pipeline_metodo( ...
         nome_metodo, cartella_immagini, cartella_labels, ...
         lista_valutazione_img, lista_valutazione_lbl, num_valutazione, ...
         filtro_best, config_best, false, true);
 
-    Risultati_Tumor{m}.nome        = nome_metodo;
-    Risultati_Tumor{m}.filtro      = filtro_best.nome;
-    Risultati_Tumor{m}.config      = config_best;
-    Risultati_Tumor{m}.Accuracy    = Acc;
-    Risultati_Tumor{m}.Sensitivity = Sens;
-    Risultati_Tumor{m}.Specificity = Spec;
-    Risultati_Tumor{m}.Jaccard     = Jacc;
-    Risultati_Tumor{m}.F1          = F1;
+    Risultati_Oracle{m}.nome        = nome_metodo;
+    Risultati_Oracle{m}.filtro      = filtro_best.nome;
+    Risultati_Oracle{m}.config      = config_best;
+    Risultati_Oracle{m}.Accuracy    = Acc;
+    Risultati_Oracle{m}.Sensitivity = Sens;
+    Risultati_Oracle{m}.Specificity = Spec;
+    Risultati_Oracle{m}.Jaccard     = Jacc;
+    Risultati_Oracle{m}.F1          = F1;
 end
 
 % =========================================================================
-% CONFRONTO FINALE — TABELLA 1: TUTTE LE SLICE (RISULTATI ORIGINALI)
+% TABELLA ORACLE — RISULTATI FINALI
 % =========================================================================
 fprintf('\n\n******************************************************\n');
-fprintf('   ELABORAZIONE COMPLETATA - RISULTATI A CONFRONTO\n');
+fprintf('   ORACLE SANITY CHECK — RISULTATI\n');
+fprintf('   [Specificity esclude le slice senza tumore]\n');
 fprintf('******************************************************\n\n');
 
-fprintf('--- TABELLA 1: Tutte le slice della ROI (valutazione standard) ---\n\n');
 fprintf('%-12s  %-22s  %-14s  %6s  %6s  %6s  %6s  %6s\n', ...
     'Metodo', 'Filtro', 'Config', 'Acc', 'Sens', 'Spec', 'Jacc', 'F1');
 fprintf('%s\n', repmat('-', 1, 84));
 
 for m = 1:numel(metodi_da_testare)
-    Media_Acc  = mean(Risultati_All{m}.Accuracy);
-    Media_Sens = mean(Risultati_All{m}.Sensitivity);
-    Media_Spec = mean(Risultati_All{m}.Specificity);
-    Media_Jacc = mean(Risultati_All{m}.Jaccard);
-    Media_F1   = mean(Risultati_All{m}.F1);
-    cfg_label  = format_config_main(Risultati_All{m}.nome, Risultati_All{m}.config);
+    Media_Acc  = mean(Risultati_Oracle{m}.Accuracy);
+    Media_Sens = mean(Risultati_Oracle{m}.Sensitivity);
+    Media_Spec = mean(Risultati_Oracle{m}.Specificity);
+    Media_Jacc = mean(Risultati_Oracle{m}.Jaccard);
+    Media_F1   = mean(Risultati_Oracle{m}.F1);
+    cfg_label  = format_config_main(Risultati_Oracle{m}.nome, Risultati_Oracle{m}.config);
     fprintf('%-12s  %-22s  %-14s  %.4f  %.4f  %.4f  %.4f  %.4f\n', ...
-        Risultati_All{m}.nome, Risultati_All{m}.filtro, cfg_label, ...
-        Media_Acc, Media_Sens, Media_Spec, Media_Jacc, Media_F1);
-end
-
-% =========================================================================
-% CONFRONTO FINALE — TABELLA 2: SOLO SLICE CON TUMORE (ANALISI COMPLEMENTARE)
-% =========================================================================
-fprintf('\n--- TABELLA 2: Solo slice con tumore nella GT (analisi complementare) ---\n');
-fprintf('    [Nota: Specificity non include le slice senza tumore]\n\n');
-fprintf('%-12s  %-22s  %-14s  %6s  %6s  %6s  %6s  %6s\n', ...
-    'Metodo', 'Filtro', 'Config', 'Acc', 'Sens', 'Spec', 'Jacc', 'F1');
-fprintf('%s\n', repmat('-', 1, 84));
-
-for m = 1:numel(metodi_da_testare)
-    Media_Acc  = mean(Risultati_Tumor{m}.Accuracy);
-    Media_Sens = mean(Risultati_Tumor{m}.Sensitivity);
-    Media_Spec = mean(Risultati_Tumor{m}.Specificity);
-    Media_Jacc = mean(Risultati_Tumor{m}.Jaccard);
-    Media_F1   = mean(Risultati_Tumor{m}.F1);
-    cfg_label  = format_config_main(Risultati_Tumor{m}.nome, Risultati_Tumor{m}.config);
-    fprintf('%-12s  %-22s  %-14s  %.4f  %.4f  %.4f  %.4f  %.4f\n', ...
-        Risultati_Tumor{m}.nome, Risultati_Tumor{m}.filtro, cfg_label, ...
+        Risultati_Oracle{m}.nome, Risultati_Oracle{m}.filtro, cfg_label, ...
         Media_Acc, Media_Sens, Media_Spec, Media_Jacc, Media_F1);
 end
 

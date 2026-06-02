@@ -16,16 +16,19 @@ function best_models = grid_search_denoising(metodi_test, cartella_immagini, ...
 %                        .nome    — nome del metodo
 %                        .filtro  — struct del miglior filtro trovato
 %                        .config  — valore della miglior configurazione trovata
-%                        .Accuracy_best — Accuracy media sui pazienti di validazione per (filtro, config) best
+%                        .F1_best — F1-Score medio sui pazienti di validazione per (filtro, config) best
 %
 %   LOGICA
 %   I loop sono organizzati con il METODO come ciclo esterno e (FILTRO × CONFIG)
 %   come cicli interni. Per ogni metodo si effettua una ricerca esaustiva su
 %   tutte le combinazioni (filtro, config) e si seleziona quella con il massimo
-%   Accuracy media sui pazienti di validazione. Il risultato è che ogni metodo viene
-%   ottimizzato indipendentemente, con il proprio filtro e la propria configurazione
-%   migliore. La valutazione finale nel Main confronterà quindi le pipeline
-%   ottimizzate di ciascun metodo.
+%   F1-Score medio sui pazienti di validazione. L'F1-Score è preferito all'Accuracy
+%   perché immune all'accuracy paradox: con classi sbilanciate (95% tessuto sano),
+%   l'Accuracy premia metodi conservativi che producono pochi FP a discapito
+%   della Sensitivity. L'F1 bilancia invece precisione e richiamo, selezionando
+%   la configurazione con la migliore sovrapposizione geometrica con la GT.
+%   Il risultato è che ogni metodo viene ottimizzato indipendentemente, con il
+%   proprio filtro e la propria configurazione migliore.
 
 % =========================================================================
 % DEFINIZIONE DELLE CONFIGURAZIONI PER OGNI METODO
@@ -46,7 +49,8 @@ best_models = struct();
 
 fprintf('\n============================================================\n');
 fprintf('   GRID SEARCH PER-METHOD (%d pazienti nel validation set)\n', num_pazienti);
-fprintf('   Logica: max(Accuracy media sui pazienti) per ogni (metodo x filtro x config)\n');
+fprintf('   Logica: max(F1-Score medio sui pazienti) per ogni (metodo x filtro x config)\n');
+fprintf('   [F1 scelto perché immune all''accuracy paradox su classi sbilanciate]\n');
 fprintf('============================================================\n\n');
 
 % =========================================================================
@@ -65,7 +69,7 @@ for m = 1:num_metodi
     fprintf('╚══════════════════════════════════════════════════════════╝\n');
 
     % Tracciamento del best per questo metodo
-    Accuracy_best = -Inf;
+    F1_best       = -Inf;
     filtro_best_m = [];
     config_best_m = NaN;
 
@@ -81,21 +85,21 @@ for m = 1:num_metodi
             tic;
             % Esecuzione della pipeline con la singola (filtro, config)
             % mostra_sanity = false: nessuna figura durante la grid search
-            [Dataset_Acc, ~, ~, ~, ~] = esegui_pipeline_metodo( ...
+            [~, ~, ~, ~, Dataset_F1] = esegui_pipeline_metodo( ...
                 metodo, cartella_immagini, cartella_labels, ...
                 lista_immagini, lista_labels, num_pazienti, ...
                 filtri(f), cfg, false);
             tempo = toc;
 
-            Accuracy_media  = mean(Dataset_Acc);
+            F1_media  = mean(Dataset_F1);
             cfg_label = format_config(metodo, cfg);
 
-            fprintf('    Config %-14s → Accuracy media = %.4f  (%.1f sec)\n', ...
-                cfg_label, Accuracy_media, tempo);
+            fprintf('    Config %-14s → F1-Score medio = %.4f  (%.1f sec)\n', ...
+                cfg_label, F1_media, tempo);
 
             % Aggiorna il best se questo (filtro, config) supera il massimo corrente
-            if Accuracy_media > Accuracy_best
-                Accuracy_best       = Accuracy_media;
+            if F1_media > F1_best
+                F1_best       = F1_media;
                 filtro_best_m = filtri(f);
                 config_best_m = cfg;
             end
@@ -106,10 +110,10 @@ for m = 1:num_metodi
     best_models(m).nome    = metodo;
     best_models(m).filtro  = filtro_best_m;
     best_models(m).config  = config_best_m;
-    best_models(m).Accuracy_best = Accuracy_best;
+    best_models(m).F1_best = F1_best;
 
-    fprintf('\n  >> BEST per %-10s: filtro="%s"  config=%-12s  Accuracy=%.4f\n\n', ...
-        metodo, filtro_best_m.nome, format_config(metodo, config_best_m), Accuracy_best);
+    fprintf('\n  >> BEST per %-10s: filtro="%s"  config=%-12s  F1=%.4f\n\n', ...
+        metodo, filtro_best_m.nome, format_config(metodo, config_best_m), F1_best);
 end
 
 % =========================================================================
@@ -118,14 +122,14 @@ end
 fprintf('============================================================\n');
 fprintf('   RIEPILOGO GRID SEARCH — CONFIGURAZIONI OTTIMALI\n');
 fprintf('============================================================\n');
-fprintf('%-12s  %-22s  %-14s  %s\n', 'Metodo', 'Filtro Ottimale', 'Config Ottimale', 'Accuracy val');
+fprintf('%-12s  %-22s  %-14s  %s\n', 'Metodo', 'Filtro Ottimale', 'Config Ottimale', 'F1 val');
 fprintf('%s\n', repmat('-', 1, 66));
 for m = 1:num_metodi
     fprintf('%-12s  %-22s  %-14s  %.4f\n', ...
         best_models(m).nome, ...
         best_models(m).filtro.nome, ...
         format_config(best_models(m).nome, best_models(m).config), ...
-        best_models(m).Accuracy_best);
+        best_models(m).F1_best);
 end
 fprintf('\n');
 
