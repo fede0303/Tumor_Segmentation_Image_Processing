@@ -130,14 +130,11 @@ end
 fprintf('\n============================================================\n');
 if ESEGUI_GRID_SEARCH
     fprintf('   VALUTAZIONE FINALE SUL TEST SET (%d pazienti)\n', num_valutazione);
-    fprintf('   Ogni metodo usa il proprio filtro e config ottimali\n');
 else
     fprintf('   VALUTAZIONE FINALE SULL''INTERO DATASET (%d pazienti)\n', num_valutazione);
-    fprintf('   Filtro e config di default per ogni metodo\n');
 end
 fprintf('============================================================\n\n');
 
-% Preallocazione contenitore risultati
 Risultati = cell(1, numel(metodi_da_testare));
 
 for m = 1:numel(metodi_da_testare)
@@ -149,18 +146,16 @@ for m = 1:numel(metodi_da_testare)
     fprintf('   METODO:  %s\n', nome_metodo);
     fprintf('   Filtro:  %s\n', filtro_best.nome);
     fprintf('   Config:  %s\n', format_config_main(nome_metodo, config_best));
-    if ESEGUI_GRID_SEARCH && ~isnan(best_models(m).Accuracy_best)
-        fprintf('   Accuracy val:  %.4f\n', best_models(m).Accuracy_best);
+    if ESEGUI_GRID_SEARCH && ~isnan(best_models(m).F1_best)
+        fprintf('   F1 val:  %.4f\n', best_models(m).F1_best);
     end
     fprintf('======================================================\n');
 
-    % Esecuzione della pipeline con la singola config ottimale
     [Dataset_Acc, Dataset_Sens, Dataset_Spec, Dataset_Jacc, Dataset_F1] = ...
         esegui_pipeline_metodo(nome_metodo, cartella_immagini, cartella_labels, ...
         lista_valutazione_img, lista_valutazione_lbl, num_valutazione, ...
         filtro_best, config_best);
 
-    % Archiviazione risultati
     Risultati{m}.nome        = nome_metodo;
     Risultati{m}.filtro      = filtro_best.nome;
     Risultati{m}.config      = config_best;
@@ -178,29 +173,23 @@ fprintf('\n\n******************************************************\n');
 fprintf('   ELABORAZIONE COMPLETATA - RISULTATI A CONFRONTO\n');
 fprintf('******************************************************\n\n');
 
-% Intestazione tabella
 fprintf('%-12s  %-22s  %-14s  %6s  %6s  %6s  %6s  %6s\n', ...
     'Metodo', 'Filtro', 'Config', 'Acc', 'Sens', 'Spec', 'Jacc', 'F1');
 fprintf('%s\n', repmat('-', 1, 84));
 
 for m = 1:numel(metodi_da_testare)
-    % Medie aritmetiche sui pazienti del set di valutazione
     Media_Acc  = mean(Risultati{m}.Accuracy);
     Media_Sens = mean(Risultati{m}.Sensitivity);
     Media_Spec = mean(Risultati{m}.Specificity);
     Media_Jacc = mean(Risultati{m}.Jaccard);
     Media_F1   = mean(Risultati{m}.F1);
-
-    cfg_label = format_config_main(Risultati{m}.nome, Risultati{m}.config);
-
+    cfg_label  = format_config_main(Risultati{m}.nome, Risultati{m}.config);
     fprintf('%-12s  %-22s  %-14s  %.4f  %.4f  %.4f  %.4f  %.4f\n', ...
         Risultati{m}.nome, Risultati{m}.filtro, cfg_label, ...
         Media_Acc, Media_Sens, Media_Spec, Media_Jacc, Media_F1);
 end
 
 fprintf('\n');
-
-
 
 % =========================================================================
 % FUNZIONE DI SUPPORTO — Formatta la config come stringa leggibile
