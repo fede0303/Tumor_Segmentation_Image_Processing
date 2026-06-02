@@ -125,20 +125,23 @@ else
 end
 
 % =========================================================================
-% VALUTAZIONE FINALE — OGNI METODO CON IL PROPRIO BEST (FILTRO, CONFIG)
+% VALUTAZIONE FINALE — DOPPIO PASSAGGIO
+%   Passaggio 1 (flag=false): tutte le slice della ROI  → risultati originali
+%   Passaggio 2 (flag=true) : solo slice con tumore in GT → analisi complementare
+% I risultati del Passaggio 1 sono quelli riportati nella Sezione 6 della relazione.
+% Il Passaggio 2 rimuove il contributo dei FP generati su slice prive di lesione.
 % =========================================================================
 fprintf('\n============================================================\n');
 if ESEGUI_GRID_SEARCH
     fprintf('   VALUTAZIONE FINALE SUL TEST SET (%d pazienti)\n', num_valutazione);
-    fprintf('   Ogni metodo usa il proprio filtro e config ottimali\n');
 else
     fprintf('   VALUTAZIONE FINALE SULL''INTERO DATASET (%d pazienti)\n', num_valutazione);
-    fprintf('   Filtro e config di default per ogni metodo\n');
 end
 fprintf('============================================================\n\n');
 
-% Preallocazione contenitore risultati
-Risultati = cell(1, numel(metodi_da_testare));
+% Preallocazione contenitori per i due passaggi
+Risultati_All   = cell(1, numel(metodi_da_testare));   % tutte le slice
+Risultati_Tumor = cell(1, numel(metodi_da_testare));   % solo slice positive
 
 for m = 1:numel(metodi_da_testare)
     nome_metodo = best_models(m).nome;
@@ -154,47 +157,83 @@ for m = 1:numel(metodi_da_testare)
     end
     fprintf('======================================================\n');
 
-    % Esecuzione della pipeline con la singola config ottimale
-    [Dataset_Acc, Dataset_Sens, Dataset_Spec, Dataset_Jacc, Dataset_F1] = ...
-        esegui_pipeline_metodo(nome_metodo, cartella_immagini, cartella_labels, ...
+    % ------------------------------------------------------------------
+    % Passaggio 1: tutte le slice della ROI (comportamento originale)
+    % ------------------------------------------------------------------
+    [Acc, Sens, Spec, Jacc, F1] = esegui_pipeline_metodo( ...
+        nome_metodo, cartella_immagini, cartella_labels, ...
         lista_valutazione_img, lista_valutazione_lbl, num_valutazione, ...
-        filtro_best, config_best);
+        filtro_best, config_best, true, false);
 
-    % Archiviazione risultati
-    Risultati{m}.nome        = nome_metodo;
-    Risultati{m}.filtro      = filtro_best.nome;
-    Risultati{m}.config      = config_best;
-    Risultati{m}.Accuracy    = Dataset_Acc;
-    Risultati{m}.Sensitivity = Dataset_Sens;
-    Risultati{m}.Specificity = Dataset_Spec;
-    Risultati{m}.Jaccard     = Dataset_Jacc;
-    Risultati{m}.F1          = Dataset_F1;
+    Risultati_All{m}.nome        = nome_metodo;
+    Risultati_All{m}.filtro      = filtro_best.nome;
+    Risultati_All{m}.config      = config_best;
+    Risultati_All{m}.Accuracy    = Acc;
+    Risultati_All{m}.Sensitivity = Sens;
+    Risultati_All{m}.Specificity = Spec;
+    Risultati_All{m}.Jaccard     = Jacc;
+    Risultati_All{m}.F1          = F1;
+
+    % ------------------------------------------------------------------
+    % Passaggio 2: solo slice con tumore (analisi complementare)
+    % ------------------------------------------------------------------
+    [Acc, Sens, Spec, Jacc, F1] = esegui_pipeline_metodo( ...
+        nome_metodo, cartella_immagini, cartella_labels, ...
+        lista_valutazione_img, lista_valutazione_lbl, num_valutazione, ...
+        filtro_best, config_best, false, true);
+
+    Risultati_Tumor{m}.nome        = nome_metodo;
+    Risultati_Tumor{m}.filtro      = filtro_best.nome;
+    Risultati_Tumor{m}.config      = config_best;
+    Risultati_Tumor{m}.Accuracy    = Acc;
+    Risultati_Tumor{m}.Sensitivity = Sens;
+    Risultati_Tumor{m}.Specificity = Spec;
+    Risultati_Tumor{m}.Jaccard     = Jacc;
+    Risultati_Tumor{m}.F1          = F1;
 end
 
 % =========================================================================
-% CONFRONTO FINALE — TABELLA RIEPILOGATIVA
+% CONFRONTO FINALE — TABELLA 1: TUTTE LE SLICE (RISULTATI ORIGINALI)
 % =========================================================================
 fprintf('\n\n******************************************************\n');
 fprintf('   ELABORAZIONE COMPLETATA - RISULTATI A CONFRONTO\n');
 fprintf('******************************************************\n\n');
 
-% Intestazione tabella
+fprintf('--- TABELLA 1: Tutte le slice della ROI (valutazione standard) ---\n\n');
 fprintf('%-12s  %-22s  %-14s  %6s  %6s  %6s  %6s  %6s\n', ...
     'Metodo', 'Filtro', 'Config', 'Acc', 'Sens', 'Spec', 'Jacc', 'F1');
 fprintf('%s\n', repmat('-', 1, 84));
 
 for m = 1:numel(metodi_da_testare)
-    % Medie aritmetiche sui pazienti del set di valutazione
-    Media_Acc  = mean(Risultati{m}.Accuracy);
-    Media_Sens = mean(Risultati{m}.Sensitivity);
-    Media_Spec = mean(Risultati{m}.Specificity);
-    Media_Jacc = mean(Risultati{m}.Jaccard);
-    Media_F1   = mean(Risultati{m}.F1);
-
-    cfg_label = format_config_main(Risultati{m}.nome, Risultati{m}.config);
-
+    Media_Acc  = mean(Risultati_All{m}.Accuracy);
+    Media_Sens = mean(Risultati_All{m}.Sensitivity);
+    Media_Spec = mean(Risultati_All{m}.Specificity);
+    Media_Jacc = mean(Risultati_All{m}.Jaccard);
+    Media_F1   = mean(Risultati_All{m}.F1);
+    cfg_label  = format_config_main(Risultati_All{m}.nome, Risultati_All{m}.config);
     fprintf('%-12s  %-22s  %-14s  %.4f  %.4f  %.4f  %.4f  %.4f\n', ...
-        Risultati{m}.nome, Risultati{m}.filtro, cfg_label, ...
+        Risultati_All{m}.nome, Risultati_All{m}.filtro, cfg_label, ...
+        Media_Acc, Media_Sens, Media_Spec, Media_Jacc, Media_F1);
+end
+
+% =========================================================================
+% CONFRONTO FINALE — TABELLA 2: SOLO SLICE CON TUMORE (ANALISI COMPLEMENTARE)
+% =========================================================================
+fprintf('\n--- TABELLA 2: Solo slice con tumore nella GT (analisi complementare) ---\n');
+fprintf('    [Nota: Specificity non include le slice senza tumore]\n\n');
+fprintf('%-12s  %-22s  %-14s  %6s  %6s  %6s  %6s  %6s\n', ...
+    'Metodo', 'Filtro', 'Config', 'Acc', 'Sens', 'Spec', 'Jacc', 'F1');
+fprintf('%s\n', repmat('-', 1, 84));
+
+for m = 1:numel(metodi_da_testare)
+    Media_Acc  = mean(Risultati_Tumor{m}.Accuracy);
+    Media_Sens = mean(Risultati_Tumor{m}.Sensitivity);
+    Media_Spec = mean(Risultati_Tumor{m}.Specificity);
+    Media_Jacc = mean(Risultati_Tumor{m}.Jaccard);
+    Media_F1   = mean(Risultati_Tumor{m}.F1);
+    cfg_label  = format_config_main(Risultati_Tumor{m}.nome, Risultati_Tumor{m}.config);
+    fprintf('%-12s  %-22s  %-14s  %.4f  %.4f  %.4f  %.4f  %.4f\n', ...
+        Risultati_Tumor{m}.nome, Risultati_Tumor{m}.filtro, cfg_label, ...
         Media_Acc, Media_Sens, Media_Spec, Media_Jacc, Media_F1);
 end
 

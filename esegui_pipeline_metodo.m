@@ -41,11 +41,21 @@
 
 function [Dataset_Acc, Dataset_Sens, Dataset_Spec, Dataset_Jacc, Dataset_F1] = ...
     esegui_pipeline_metodo(nome_metodo, cartella_immagini, cartella_labels, ...
-    lista_immagini, lista_labels, num_pazienti, filtro, config_singola, mostra_sanity)
+    lista_immagini, lista_labels, num_pazienti, filtro, config_singola, mostra_sanity, ...
+    solo_slice_positive)
 
     % Imposta il default per la visualizzazione di controllo
     if nargin < 9
         mostra_sanity = true;
+    end
+
+    % Se true, nel ciclo sulle slice vengono considerate SOLO le slice che
+    % contengono almeno un voxel tumorale nella Ground Truth.
+    % Questo permette di confrontare le metriche con e senza il contributo
+    % dei falsi positivi generati sulle slice prive di lesione.
+    % Default false: comportamento identico alla versione originale.
+    if nargin < 10
+        solo_slice_positive = false;
     end
 
 % =========================================================================
@@ -163,6 +173,23 @@ for paziente_idx = 1:num_pazienti
     for z = slice_iniziale:slice_finale
 
         % ---------------------------------------------------------
+        % GROUND TRUTH DELLA SLICE
+        % ---------------------------------------------------------
+        gt_slice = vol_GT(:, :, z);
+        gt_slice = imresize(gt_slice, dim_standard, 'nearest');
+
+        % ---------------------------------------------------------
+        % FILTRO SLICE: se abilitato, salta le slice senza tumore
+        % ---------------------------------------------------------
+        % Quando solo_slice_positive = true, viene valutata la segmentazione
+        % SOLO sulle slice in cui la GT contiene almeno un voxel tumorale.
+        % La presenza del tumore è derivata runtime dalla GT stessa;
+        % non viene usata nessuna informazione sulla segmentazione prevista.
+        if solo_slice_positive && ~any(gt_slice(:))
+            continue;   % slice senza tumore: non contribuisce ad alcun contatore
+        end
+
+        % ---------------------------------------------------------
         % PRE-PROCESSING DELLA SLICE
         % ---------------------------------------------------------
         slice    = vol_FLAIR(:, :, z);
@@ -182,12 +209,6 @@ for paziente_idx = 1:num_pazienti
         end
 
         img_processata = imresize(img_filtrata, dim_standard);
-
-        % ---------------------------------------------------------
-        % GROUND TRUTH DELLA SLICE
-        % ---------------------------------------------------------
-        gt_slice = vol_GT(:, :, z);
-        gt_slice = imresize(gt_slice, dim_standard, 'nearest');
 
         % ---------------------------------------------------------
         % SEGMENTAZIONE CON LA CONFIG SINGOLA
